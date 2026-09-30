@@ -31,10 +31,18 @@ Restart opencode after changing config or adding the skill.
 
 ## Connect your Odoo
 
-In opencode, just ask **"connect odoo"**. The skill asks for your server URL,
-database, login email and an API key (Odoo → Preferences → Account Security →
-API Keys), writes `~/.config/opencode/odoo.json` (chmod 600), and verifies the
-connection. The key is never logged or committed.
+Run the setup script and answer the prompts:
+
+```bash
+./setup.sh
+```
+
+It asks for your server URL, database, login email and an API key (Odoo →
+Preferences → Account Security → API Keys), writes
+`~/.config/opencode/odoo.json` (chmod 600), and verifies the connection. The
+key is never logged or committed.
+
+Prefer to do it from inside opencode? Just ask **"connect odoo"**.
 
 ## Use
 
