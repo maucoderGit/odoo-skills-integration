@@ -89,6 +89,43 @@ def select_items(items, open_only=True, limit=None):
     return items[:limit] if limit else items
 
 
+def check_field(name, schema):
+    if name not in schema:
+        raise ValueError("Unknown field %r (run `fields <model>`)" % name)
+    if schema[name].get("readonly"):
+        raise ValueError("Field %r is readonly" % name)
+
+
+def coerce_value(field, value, resolve):
+    t = field.get("type")
+    if value is None or value is False:
+        if t in ("one2many", "many2many"):
+            return [(6, 0, [])]
+        return False if t == "many2one" else value
+    if t == "boolean":
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "y", "t")
+        return bool(value)
+    if t == "integer":
+        return int(value)
+    if t in ("float", "monetary"):
+        return float(value)
+    if t == "selection":
+        for key, _label in field.get("selection") or []:
+            if value == key or str(value) == str(key):
+                return key
+        raise ValueError("Invalid selection %r; valid: %s"
+                         % (value, [k for k, _ in field.get("selection") or []]))
+    if t == "many2one":
+        if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+            return int(value)
+        return resolve(value)
+    if t in ("one2many", "many2many"):
+        vals = value if isinstance(value, (list, tuple)) else [value]
+        return [(6, 0, [v if isinstance(v, int) else resolve(v) for v in vals])]
+    return value
+
+
 class Odoo:
     def __init__(self, cfg=None):
         self.cfg = cfg or load_config()
@@ -329,6 +366,30 @@ class Odoo:
         return {"key": "%s/%s" % (model, id_), "line_id": line, "hours": float(hours),
                 "note": vals["name"], "project": project[1], "logged": True}
 
+    def write(self, model, ref, values):
+        model = MODELS.get(model, model)
+        id_ = self._resolve(model, ref)
+        schema = self.schema(model)
+        out = {}
+        for k, v in values.items():
+            check_field(k, schema)
+            rel = schema[k].get("relation")
+            out[k] = coerce_value(schema[k], v,
+                                  lambda name, rel=rel: self._resolve_name(rel, name))
+        self._call(model, "write", [[id_], out])
+        return {"model": model, "id": id_, "written": out}
+
+    def _resolve_name(self, rel, name):
+        if not rel:
+            raise ValueError("Can't resolve %r: field has no relation" % name)
+        hits = self._call(rel, "name_search", [name], {"limit": 2})
+        if not hits:
+            raise ValueError("No %s named %r" % (rel, name))
+        if len(hits) > 1:
+            raise ValueError("Ambiguous %s %r matches %s"
+                             % (rel, name, [h[1] for h in hits]))
+        return hits[0][0]
+
     def done(self, model, ref):
         model = MODELS.get(model, model)
         id_ = self._resolve(model, ref)
@@ -417,6 +478,37 @@ def selftest():
     assert t._closed("m", {"state": "1_done"}) is True
     assert t._closed("m", {"state": "01_in_progress"}) is False
     assert t._closed("t", {"closed": True}) is True
+    sch = {"name": {"type": "char"},
+           "priority": {"type": "selection", "selection": [["0", "Low"], ["1", "High"]]},
+           "user_id": {"type": "many2one", "relation": "res.users"},
+           "tag_ids": {"type": "many2many", "relation": "x.tag"},
+           "active": {"type": "boolean"}}
+    r = lambda n: {"Alice": 7}[n]
+    check_field("name", sch)
+    try:
+        check_field("nope", sch)
+        assert False
+    except ValueError:
+        pass
+    try:
+        check_field("x", {"x": {"readonly": True}})
+        assert False
+    except ValueError:
+        pass
+    assert coerce_value(sch["name"], "hi", r) == "hi"
+    assert coerce_value(sch["priority"], "1", r) == "1"
+    assert coerce_value(sch["active"], "true", r) is True
+    assert coerce_value(sch["user_id"], "Alice", r) == 7
+    assert coerce_value(sch["user_id"], 3, r) == 3
+    assert coerce_value(sch["user_id"], False, r) is False
+    assert coerce_value(sch["tag_ids"], ["Alice", 4], r) == [(6, 0, [7, 4])]
+    assert coerce_value(sch["tag_ids"], False, r) == [(6, 0, [])]
+    for bad in ("9", "High"):
+        try:
+            coerce_value(sch["priority"], bad, r)
+            assert False
+        except ValueError:
+            pass
     print("selftest ok")
 
 
@@ -490,6 +582,11 @@ def main():
     d.add_argument("model", choices=list(MODELS))
     d.add_argument("ref")
 
+    wp = sub.add_parser("write")
+    wp.add_argument("model")
+    wp.add_argument("ref")
+    wp.add_argument("values", help="{field: value} JSON/Python dict; '-' reads stdin")
+
     args = p.parse_args()
 
     def clist(s):
@@ -529,6 +626,8 @@ def main():
                            clist(args.fields)))
         elif args.cmd == "done":
             emit(odoo.done(args.model, args.ref))
+        elif args.cmd == "write":
+            emit(odoo.write(args.model, args.ref, parse_domain(args.values)))
         elif args.cmd == "time":
             note = " ".join(args.note)
             if args.time_cmd == "start":
